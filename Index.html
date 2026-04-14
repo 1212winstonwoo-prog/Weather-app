@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkyCast - Persistent Station</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        /* Styles remain the same as previous version */
+        :root { --glass: rgba(0, 0, 0, 0.85); --accent: #00d2ff; --alert: #ff0000; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; font-family: 'Segoe UI', sans-serif; color: white; background: #000; overflow: hidden; }
+        nav { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; z-index: 1000; background: var(--glass); padding: 10px; border-radius: 50px; backdrop-filter: blur(10px); }
+        .nav-btn { padding: 10px 20px; border-radius: 25px; cursor: pointer; border: none; background: transparent; color: white; font-weight: bold; }
+        .nav-btn.active { background: var(--accent); color: black; }
+        .page { display: none; width: 100%; height: 100%; position: absolute; top: 0; left: 0; }
+        .page.active { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        #clock { font-size: 8rem; font-weight: 200; }
+        #alert-overlay { display: none; position: fixed; top:0; left:0; width:100%; height:100%; background: rgba(180, 0, 0, 0.98); z-index: 3000; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
+    </style>
+</head>
+<body>
+
+    <div id="init-screen" style="position:fixed; width:100%; height:100%; background:#000; z-index:4000; display:flex; flex-direction:column; justify-content:center; align-items:center;">
+        <button class="nav-btn active" style="padding:20px 40px;" onclick="startSystem()">ACTIVATE PERSISTENT STATION</button>
+        <p style="color:gray; font-size:0.8rem; margin-top:10px;">Enables Background Monitoring</p>
+    </div>
+
+    <div id="standby" class="page active">
+        <div id="clock">00:00</div>
+        <div id="status-tag" style="color:var(--accent); font-size:0.7rem;">BACKGROUND MONITORING ENABLED</div>
+        <div id="forecast-container" style="display:flex; gap:12px; margin-top:20px;"></div>
+    </div>
+
+    <div id="alert-overlay">
+        <h1>⚠️ EMERGENCY ALERT</h1>
+        <h2 id="alert-headline"></h2>
+        <p id="alert-areas"></p>
+    </div>
+
+    <script>
+        let lastAlertId = null;
+        let isBackground = false;
+        
+        // Audio Assets
+        const startTone = new Audio('https://raw.githubusercontent.com/1212winstonwoo-prog/Pager-assets/adf8cf4c091e9b2b8c0855eb38e1fb9259fd8352/nrginc-eas-start-tone-255446.mp3');
+        const endTone = new Audio('https://raw.githubusercontent.com/1212winstonwoo-prog/Pager-assets/adf8cf4c091e9b2b8c0855eb38e1fb9259fd8352/nrginc-eas-end-tone-255447.mp3');
+        
+        // This "Wake Lock" keeps the screen from timing out if supported
+        let wakeLock = null;
+
+        async function startSystem() {
+            document.getElementById('init-screen').style.display = 'none';
+            
+            // Request Wake Lock
+            if ('wakeLock' in navigator) {
+                try { wakeLock = await navigator.wakeLock.request('screen'); } catch (err) {}
+            }
+
+            updateClock();
+            setInterval(updateClock, 1000);
+
+            // Background Detection logic
+            document.addEventListener("visibilitychange", () => {
+                isBackground = document.hidden;
+                console.log(isBackground ? "Switched to background" : "App in foreground");
+            });
+
+            navigator.geolocation.getCurrentPosition(pos => {
+                const lat = pos.coords.latitude;
+                const lon = pos.coords.longitude;
+                
+                // Check weather every 60 seconds even if tab is hidden
+                setInterval(() => checkAlerts(lat, lon), 60000);
+                checkAlerts(lat, lon); 
+            });
+        }
+
+        async function checkAlerts(lat, lon) {
+            try {
+                const res = await fetch(`https://api.weather.gov/alerts/active?point=${lat.toFixed(4)},${lon.toFixed(4)}`);
+                const data = await res.json();
+                
+                if (data.features.length > 0) {
+                    const alert = data.features[0].properties;
+                    if (alert.id !== lastAlertId) {
+                        triggerAlert(alert);
+                    }
+                }
+            } catch (e) { console.log("Background fetch failed, retrying..."); }
+        }
+
+        function triggerAlert(props) {
+            lastAlertId = props.id;
+            const event = props.event;
+            const counties = props.areaDesc;
+            const isWarning = event.toLowerCase().includes('warning');
+
+            // Construct professional script
+            let script = `The National Weather Service has issued the following alerts. There has been a ${event} in the following counties: ${counties}. `;
+            if (isWarning) {
+                script += `Take action now. Hazard: ${event}. `;
+                if (event.toLowerCase().includes('tornado') || event.toLowerCase().includes('wind')) {
+                    script += `Get to the lowest floor in your house or into an internal room without windows. If you are in an RV, mobile home, or other places without shelter, get to a ditch or hide under trees. `;
+                }
+                if (event.toLowerCase().includes('flood')) {
+                    script += `Hazard: Flash Flooding. Get to highest ground available now. `;
+                }
+            }
+
+            // Visuals (Only matters if foreground)
+            document.getElementById('alert-overlay').style.display = 'flex';
+            document.getElementById('alert-headline').innerText = event;
+            document.getElementById('alert-areas').innerText = counties;
+
+            // Audio is the priority for background
+            startTone.play().catch(e => console.log("Audio play blocked by system policy"));
+            
+            startTone.onended = () => {
+                const speech = new SpeechSynthesisUtterance(script);
+                speech.rate = 0.9;
+                speech.onend = () => {
+                    endTone.play();
+                    endTone.onended = () => {
+                        document.getElementById('alert-overlay').style.display = 'none';
+                    };
+                };
+                window.speechSynthesis.speak(speech);
+            };
+        }
+
+        function updateClock() {
+            document.getElementById('clock').innerText = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        }
+    </script>
+</body>
+</html>
